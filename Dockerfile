@@ -17,6 +17,10 @@ COPY . .
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
+
+# Expose the port
+EXPOSE 8080
 
 # Command to run the application
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8000"]
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080"]
