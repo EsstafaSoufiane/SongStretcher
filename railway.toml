@@ -1,6 +1,11 @@
 [build]
-builder = "heroku/buildpacks:20"
-buildpacks = [
-    "https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest.git",
-    "https://github.com/heroku/heroku-buildpack-python.git"
-]
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "gunicorn app:app"
+healthcheckPath = "/"
+healthcheckTimeout = 100
+restartPolicyType = "on_failure"
+
+[phases.setup]
+nixPkgs = ["ffmpeg"]
