@@ -8,12 +8,15 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
-# Set up FFmpeg environment variables - using local paths
+# Set up FFmpeg environment variables
 if os.environ.get('RAILWAY_STATIC_URL'):
-    # We're on Railway, FFmpeg should be pre-installed
-    AudioSegment.converter = "ffmpeg"
-    AudioSegment.ffmpeg = "ffmpeg"
-    AudioSegment.ffprobe = "ffprobe"
+    # We're on Railway, use the buildpack FFmpeg
+    FFMPEG_PATH = "/app/vendor/ffmpeg/ffmpeg"
+    FFPROBE_PATH = "/app/vendor/ffmpeg/ffprobe"
+    
+    AudioSegment.converter = FFMPEG_PATH
+    AudioSegment.ffmpeg = FFMPEG_PATH
+    AudioSegment.ffprobe = FFPROBE_PATH
 else:
     # Local development setup
     FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg")
