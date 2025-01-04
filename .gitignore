@@ -1,0 +1,5 @@
+ffmpeg.zip
+ffmpeg/
+__pycache__/
+*.pyc
+.env
