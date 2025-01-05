@@ -6,26 +6,35 @@ import tempfile
 from flask_cors import CORS
 import logging
 import traceback
+import uuid
+from pathlib import Path
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app, resources={
-    r"/*": {  # Allow all routes since we're using the same domain
-        "origins": "*",  # In production, you should specify your domain
+    r"/*": {
+        "origins": "*",
         "methods": ["GET", "POST"],
         "allow_headers": ["Content-Type"]
     }
 })
 
-app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+# Set up temporary directory
+TEMP_DIR = Path("/app/temp")
+if not TEMP_DIR.exists():
+    TEMP_DIR.mkdir(parents=True)
+
+app.config['UPLOAD_FOLDER'] = str(TEMP_DIR)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
 # Set up FFmpeg environment variables
 if os.environ.get('RAILWAY_STATIC_URL'):
-    # We're on Railway with Docker
     AudioSegment.converter = "ffmpeg"
     AudioSegment.ffmpeg = "ffmpeg"
     AudioSegment.ffprobe = "ffprobe"
@@ -35,7 +44,6 @@ else:
     if not os.path.exists(FFMPEG_PATH):
         os.makedirs(FFMPEG_PATH, exist_ok=True)
 
-    # Try multiple common FFmpeg locations
     possible_ffmpeg_paths = [
         r"C:\Program Files\ffmpeg\bin",
         r"C:\ffmpeg\bin",
@@ -56,30 +64,15 @@ else:
     if not ffmpeg_found:
         logger.error("FFmpeg not found. Please install FFmpeg and make sure it's in your PATH")
 
-def process_audio(file_path, speed_factor):
-    try:
-        # Detect file type from extension
-        file_ext = os.path.splitext(file_path)[1].lower()
-        if file_ext == '.mp3':
-            audio = AudioSegment.from_mp3(file_path)
-        elif file_ext == '.wav':
-            audio = AudioSegment.from_wav(file_path)
-        else:
-            raise ValueError("Unsupported file format")
-
-        modified_audio = audio._spawn(audio.raw_data, overrides={"frame_rate": int(audio.frame_rate * speed_factor)})
-        
-        output_path = os.path.join(
-            app.config['UPLOAD_FOLDER'],
-            f"speedup_{os.path.basename(file_path)}"
-        )
-        # Export in the same format as input
-        modified_audio.export(output_path, format=file_ext[1:])
-        return output_path
-    except Exception as e:
-        logger.error(f"Error processing audio: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
+def cleanup_temp_files(*files):
+    """Clean up temporary files"""
+    for file in files:
+        try:
+            if file and os.path.exists(file):
+                os.remove(file)
+                logger.info(f"Cleaned up temporary file: {file}")
+        except Exception as e:
+            logger.error(f"Error cleaning up file {file}: {str(e)}")
 
 @app.route('/')
 def index():
@@ -87,6 +80,9 @@ def index():
 
 @app.route('/process', methods=['POST'])
 def process_audio():
+    temp_input = None
+    temp_output = None
+    
     try:
         logger.info("Processing new audio request")
         if 'file' not in request.files:
@@ -98,54 +94,58 @@ def process_audio():
             logger.error("No selected file")
             return jsonify({'error': 'No selected file'}), 400
 
-        if file:
-            filename = secure_filename(file.filename)
-            logger.info(f"Processing file: {filename}")
-            
-            # Save uploaded file
-            temp_input = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(temp_input)
-            logger.info(f"File saved to: {temp_input}")
+        # Validate file extension
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        if file_ext not in ['.mp3', '.wav']:
+            logger.error(f"Invalid file extension: {file_ext}")
+            return jsonify({'error': 'Only MP3 and WAV files are allowed'}), 400
 
-            try:
-                # Load and process audio
-                audio = AudioSegment.from_file(temp_input)
-                logger.info("Audio file loaded successfully")
-                
-                # Speed up the audio (1.15x)
-                fast_audio = audio.speedup(playback_speed=1.15)
-                logger.info("Audio speed adjustment completed")
+        # Generate unique filenames
+        unique_id = str(uuid.uuid4())
+        filename = secure_filename(file.filename)
+        temp_input = str(TEMP_DIR / f"input_{unique_id}{file_ext}")
+        temp_output = str(TEMP_DIR / f"output_{unique_id}{file_ext}")
 
-                # Save the processed audio
-                output_filename = f"fast_{filename}"
-                temp_output = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
-                fast_audio.export(temp_output, format=os.path.splitext(filename)[1][1:])
-                logger.info(f"Processed audio saved to: {temp_output}")
+        logger.info(f"Processing file: {filename}")
+        file.save(temp_input)
+        logger.info(f"File saved to: {temp_input}")
 
-                # Send the file
-                return send_file(
-                    temp_output,
-                    as_attachment=True,
-                    download_name=output_filename
-                )
-            except Exception as e:
-                logger.error(f"Error processing audio: {str(e)}")
-                logger.error(traceback.format_exc())
-                return jsonify({'error': f'Error processing audio: {str(e)}'}), 500
-            finally:
-                # Clean up temporary files
-                try:
-                    if os.path.exists(temp_input):
-                        os.remove(temp_input)
-                    if os.path.exists(temp_output):
-                        os.remove(temp_output)
-                except Exception as e:
-                    logger.error(f"Error cleaning up temporary files: {str(e)}")
+        try:
+            # Process in smaller chunks if possible
+            audio = AudioSegment.from_file(temp_input)
+            logger.info(f"Audio loaded: duration={len(audio)}ms")
+
+            # Speed up the audio (1.15x)
+            fast_audio = audio.speedup(playback_speed=1.15)
+            logger.info("Audio speed adjustment completed")
+
+            # Export with optimal settings
+            fast_audio.export(
+                temp_output,
+                format=file_ext[1:],
+                parameters=["-q:a", "0"]  # Use highest quality
+            )
+            logger.info(f"Processed audio saved to: {temp_output}")
+
+            return send_file(
+                temp_output,
+                as_attachment=True,
+                download_name=f"fast_{filename}"
+            )
+
+        except Exception as e:
+            logger.error(f"Error processing audio: {str(e)}")
+            logger.error(traceback.format_exc())
+            return jsonify({'error': f'Error processing audio: {str(e)}'}), 500
 
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+
+    finally:
+        # Clean up temporary files
+        cleanup_temp_files(temp_input, temp_output)
 
 if __name__ == '__main__':
     app.run(debug=True)
