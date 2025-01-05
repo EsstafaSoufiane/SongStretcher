@@ -52,20 +52,20 @@ def get_ffmpeg_path():
     
     return "ffmpeg"  # Default to system PATH
 
-def process_audio_with_ffmpeg(input_path, output_path):
+def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
     """Process audio using direct FFmpeg command"""
     try:
         ffmpeg_path = get_ffmpeg_path()
         logger.info(f"Using FFmpeg at: {ffmpeg_path}")
         
-        # Calculate the speed factor (1.15x = 100/115)
-        atempo = "1.15"
+        # Construct FFmpeg command with speed and volume filters
+        filter_str = f"atempo={speed},volume={volume}"
         
         # Construct FFmpeg command
         cmd = [
             ffmpeg_path,
             "-i", input_path,
-            "-filter:a", f"atempo={atempo}",
+            "-filter:a", filter_str,
             "-y",  # Overwrite output file if it exists
             "-loglevel", "info",
             output_path
@@ -110,57 +110,61 @@ def cleanup_temp_files(*files):
 def index():
     return render_template('index.html')
 
-@app.route('/process', methods=['POST'])
+@app.route('/process-audio', methods=['POST'])
 def process_audio():
-    temp_input = None
-    temp_output = None
-    
     try:
-        logger.info("Processing new audio request")
         if 'file' not in request.files:
-            logger.error("No file part in request")
-            return jsonify({'error': 'No file part'}), 400
-        
+            return jsonify({'error': 'No file provided'}), 400
+
         file = request.files['file']
         if file.filename == '':
-            logger.error("No selected file")
-            return jsonify({'error': 'No selected file'}), 400
+            return jsonify({'error': 'No file selected'}), 400
 
-        # Validate file extension
-        file_ext = os.path.splitext(file.filename)[1].lower()
-        if file_ext not in ['.mp3', '.wav']:
-            logger.error(f"Invalid file extension: {file_ext}")
-            return jsonify({'error': 'Only MP3 and WAV files are allowed'}), 400
+        # Get speed and volume parameters from request
+        speed = float(request.form.get('speed', 1.15))
+        volume = float(request.form.get('volume', 1.0))
+
+        # Validate parameters
+        if not (0.5 <= speed <= 2.0):
+            return jsonify({'error': 'Speed must be between 0.5 and 2.0'}), 400
+        if not (0.0 <= volume <= 2.0):
+            return jsonify({'error': 'Volume must be between 0.0 and 2.0'}), 400
 
         # Generate unique filenames
-        unique_id = str(uuid.uuid4())
         filename = secure_filename(file.filename)
-        temp_input = str(TEMP_DIR / f"input_{unique_id}{file_ext}")
-        temp_output = str(TEMP_DIR / f"output_{unique_id}{file_ext}")
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], f"input_{uuid.uuid4()}_{filename}")
+        output_filename = f"processed_{filename}"
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"output_{uuid.uuid4()}_{filename}")
 
-        logger.info(f"Processing file: {filename}")
-        file.save(temp_input)
-        logger.info(f"File saved to: {temp_input}")
+        # Save uploaded file
+        file.save(input_path)
 
-        # Process audio using FFmpeg
-        if process_audio_with_ffmpeg(temp_input, temp_output):
-            logger.info("Audio processing completed successfully")
-            return send_file(
-                temp_output,
-                as_attachment=True,
-                download_name=f"fast_{filename}"
-            )
-        else:
+        # Process the audio file
+        success = process_audio_with_ffmpeg(input_path, output_path, speed, volume)
+
+        if not success:
+            cleanup_temp_files(input_path, output_path)
             return jsonify({'error': 'Failed to process audio'}), 500
 
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+        # Send the processed file
+        response = send_file(
+            output_path,
+            as_attachment=True,
+            download_name=output_filename,
+            mimetype='audio/mpeg'
+        )
 
-    finally:
-        # Clean up temporary files
-        cleanup_temp_files(temp_input, temp_output)
+        # Clean up temp files after sending
+        @response.call_on_close
+        def cleanup():
+            cleanup_temp_files(input_path, output_path)
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error in process_audio: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

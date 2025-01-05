@@ -57,9 +57,25 @@
                 <div id="file-name"></div>
             </div>
 
+            <div class="mb-3">
+                <label for="speed-range" class="form-label">Speed (0.5x - 2.0x)</label>
+                <div class="d-flex align-items-center">
+                    <input type="range" class="form-range flex-grow-1" id="speed-range" min="0.5" max="2.0" step="0.05" value="1.15">
+                    <span id="speed-value" class="ms-2">1.15x</span>
+                </div>
+            </div>
+
+            <div class="mb-3">
+                <label for="volume-range" class="form-label">Volume (0.0 - 2.0)</label>
+                <div class="d-flex align-items-center">
+                    <input type="range" class="form-range flex-grow-1" id="volume-range" min="0" max="2.0" step="0.05" value="1.0">
+                    <span id="volume-value" class="ms-2">1.0</span>
+                </div>
+            </div>
+
             <div class="btn-group" role="group">
                 <button type="button" class="btn btn-primary" onclick="processAudio()" disabled id="speedup-btn">
-                    Speed Up (1.15x)
+                    Process Audio
                 </button>
             </div>
 
@@ -101,9 +117,24 @@
             fileInput.click();
         });
 
+        // Handle file input change
         fileInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             handleFile(file);
+        });
+
+        // Handle speed and volume range inputs
+        const speedRange = document.getElementById('speed-range');
+        const volumeRange = document.getElementById('volume-range');
+        const speedValue = document.getElementById('speed-value');
+        const volumeValue = document.getElementById('volume-value');
+
+        speedRange.addEventListener('input', (e) => {
+            speedValue.textContent = `${e.target.value}x`;
+        });
+
+        volumeRange.addEventListener('input', (e) => {
+            volumeValue.textContent = e.target.value;
         });
 
         function handleFile(file) {
@@ -118,36 +149,43 @@
         }
 
         async function processAudio() {
-            const file = fileInput.files[0] || null;
+            const file = fileInput.files[0];
             if (!file) return;
 
             const formData = new FormData();
             formData.append('file', file);
+            formData.append('speed', speedRange.value);
+            formData.append('volume', volumeRange.value);
 
             loading.style.display = 'block';
             speedupBtn.disabled = true;
 
             try {
-                const response = await fetch('/process', {
+                const response = await fetch('/process-audio', {
                     method: 'POST',
                     body: formData
                 });
 
                 if (!response.ok) {
-                    throw new Error('Processing failed');
+                    const error = await response.json();
+                    throw new Error(error.error || 'Failed to process audio');
                 }
 
+                // Get the blob from the response
                 const blob = await response.blob();
+                
+                // Create a download link
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `speedup_${file.name}`;
+                a.download = `processed_${file.name}`;
                 document.body.appendChild(a);
                 a.click();
                 window.URL.revokeObjectURL(url);
                 document.body.removeChild(a);
+
             } catch (error) {
-                alert('Error processing the audio file');
+                alert(error.message);
             } finally {
                 loading.style.display = 'none';
                 speedupBtn.disabled = false;
