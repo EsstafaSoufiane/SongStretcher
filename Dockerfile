@@ -18,11 +18,10 @@ COPY . .
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
-ENV TIMEOUT=1800
+ENV TIMEOUT=300
 ENV WORKER_CLASS=sync
 ENV WORKERS=1
 ENV THREADS=1
-ENV MAX_REQUESTS=1
 
 # Create directory for temporary files
 RUN mkdir -p /app/temp
@@ -37,7 +36,4 @@ CMD gunicorn app:app \
     --workers ${WORKERS} \
     --threads ${THREADS} \
     --worker-class ${WORKER_CLASS} \
-    --max-requests ${MAX_REQUESTS} \
-    --log-level debug \
-    --keep-alive 5 \
-    --preload
+    --log-level debug

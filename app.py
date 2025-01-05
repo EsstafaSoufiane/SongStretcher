@@ -8,7 +8,8 @@ import logging
 import traceback
 import uuid
 from pathlib import Path
-import gc
+import subprocess
+import shutil
 
 # Configure logging
 logging.basicConfig(
@@ -34,36 +35,66 @@ if not TEMP_DIR.exists():
 app.config['UPLOAD_FOLDER'] = str(TEMP_DIR)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
-# Set up FFmpeg environment variables
-if os.environ.get('RAILWAY_STATIC_URL'):
-    AudioSegment.converter = "ffmpeg"
-    AudioSegment.ffmpeg = "ffmpeg"
-    AudioSegment.ffprobe = "ffprobe"
-else:
+def get_ffmpeg_path():
+    """Get the appropriate FFmpeg path based on environment"""
+    if os.environ.get('RAILWAY_STATIC_URL'):
+        return "ffmpeg"
+    
     # Local development setup
-    FFMPEG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg")
-    if not os.path.exists(FFMPEG_PATH):
-        os.makedirs(FFMPEG_PATH, exist_ok=True)
-
-    possible_ffmpeg_paths = [
-        r"C:\Program Files\ffmpeg\bin",
-        r"C:\ffmpeg\bin",
-        FFMPEG_PATH,
-        os.environ.get("PATH", "").split(os.pathsep)
+    possible_paths = [
+        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        r"C:\ffmpeg\bin\ffmpeg.exe",
     ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    return "ffmpeg"  # Default to system PATH
 
-    ffmpeg_found = False
-    for path in possible_ffmpeg_paths:
-        if isinstance(path, str) and os.path.exists(os.path.join(path, "ffmpeg.exe")):
-            os.environ["PATH"] += os.pathsep + path
-            AudioSegment.converter = os.path.join(path, "ffmpeg.exe")
-            AudioSegment.ffmpeg = os.path.join(path, "ffmpeg.exe")
-            AudioSegment.ffprobe = os.path.join(path, "ffprobe.exe")
-            ffmpeg_found = True
-            break
-
-    if not ffmpeg_found:
-        logger.error("FFmpeg not found. Please install FFmpeg and make sure it's in your PATH")
+def process_audio_with_ffmpeg(input_path, output_path):
+    """Process audio using direct FFmpeg command"""
+    try:
+        ffmpeg_path = get_ffmpeg_path()
+        logger.info(f"Using FFmpeg at: {ffmpeg_path}")
+        
+        # Calculate the speed factor (1.15x = 100/115)
+        atempo = "1.15"
+        
+        # Construct FFmpeg command
+        cmd = [
+            ffmpeg_path,
+            "-i", input_path,
+            "-filter:a", f"atempo={atempo}",
+            "-y",  # Overwrite output file if it exists
+            "-loglevel", "info",
+            output_path
+        ]
+        
+        logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
+        
+        # Run FFmpeg command
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        
+        # Monitor the process
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg error: {stderr}")
+            return False
+            
+        logger.info("FFmpeg processing completed successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in process_audio_with_ffmpeg: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
 
 def cleanup_temp_files(*files):
     """Clean up temporary files"""
@@ -74,51 +105,6 @@ def cleanup_temp_files(*files):
                 logger.info(f"Cleaned up temporary file: {file}")
         except Exception as e:
             logger.error(f"Error cleaning up file {file}: {str(e)}")
-
-def process_audio_in_chunks(input_path, output_path, chunk_duration=30000):
-    """Process audio in chunks to reduce memory usage"""
-    try:
-        # Load audio file info without loading the entire file
-        audio = AudioSegment.from_file(input_path)
-        total_duration = len(audio)
-        logger.info(f"Total audio duration: {total_duration}ms")
-
-        # Process in chunks
-        processed_chunks = []
-        for start_time in range(0, total_duration, chunk_duration):
-            end_time = min(start_time + chunk_duration, total_duration)
-            logger.info(f"Processing chunk: {start_time}ms to {end_time}ms")
-            
-            # Extract and process chunk
-            chunk = audio[start_time:end_time]
-            fast_chunk = chunk.speedup(playback_speed=1.15)
-            processed_chunks.append(fast_chunk)
-            
-            # Clear memory
-            del chunk
-            gc.collect()
-
-        # Combine chunks
-        logger.info("Combining processed chunks")
-        final_audio = sum(processed_chunks, AudioSegment.empty())
-        
-        # Export with optimized settings
-        logger.info("Exporting final audio")
-        final_audio.export(
-            output_path,
-            format=os.path.splitext(output_path)[1][1:],
-            parameters=["-q:a", "0"]
-        )
-        
-        # Clear memory
-        del audio, final_audio, processed_chunks
-        gc.collect()
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error in process_audio_in_chunks: {str(e)}")
-        logger.error(traceback.format_exc())
-        return False
 
 @app.route('/')
 def index():
@@ -156,8 +142,8 @@ def process_audio():
         file.save(temp_input)
         logger.info(f"File saved to: {temp_input}")
 
-        # Process audio in chunks
-        if process_audio_in_chunks(temp_input, temp_output):
+        # Process audio using FFmpeg
+        if process_audio_with_ffmpeg(temp_input, temp_output):
             logger.info("Audio processing completed successfully")
             return send_file(
                 temp_output,
