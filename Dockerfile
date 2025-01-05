@@ -22,5 +22,10 @@ ENV PORT=8080
 # Expose the port
 EXPOSE 8080
 
-# Command to run the application
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080"]
+# Command to run the application with increased timeout and worker configuration
+CMD ["gunicorn", "app:app", \
+     "--bind", "0.0.0.0:8080", \
+     "--timeout", "300", \
+     "--workers", "2", \
+     "--threads", "2", \
+     "--worker-class", "gthread"]

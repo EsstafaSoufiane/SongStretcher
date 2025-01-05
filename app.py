@@ -1,9 +1,15 @@
-from flask import Flask, render_template, request, send_file
+from flask import Flask, render_template, request, send_file, jsonify
 from pydub import AudioSegment
 import os
 from werkzeug.utils import secure_filename
 import tempfile
 from flask_cors import CORS
+import logging
+import traceback
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -48,7 +54,7 @@ else:
             break
 
     if not ffmpeg_found:
-        print("FFmpeg not found. Please install FFmpeg and make sure it's in your PATH")
+        logger.error("FFmpeg not found. Please install FFmpeg and make sure it's in your PATH")
 
 def process_audio(file_path, speed_factor):
     try:
@@ -71,7 +77,8 @@ def process_audio(file_path, speed_factor):
         modified_audio.export(output_path, format=file_ext[1:])
         return output_path
     except Exception as e:
-        print(f"Error processing audio: {str(e)}")
+        logger.error(f"Error processing audio: {str(e)}")
+        logger.error(traceback.format_exc())
         raise
 
 @app.route('/')
@@ -79,41 +86,66 @@ def index():
     return render_template('index.html')
 
 @app.route('/process', methods=['POST'])
-def process():
-    if 'file' not in request.files:
-        return 'No file uploaded', 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return 'No file selected', 400
-    
-    file_ext = os.path.splitext(file.filename)[1].lower()
-    if file_ext not in ['.mp3', '.wav']:
-        return 'Only MP3 and WAV files are allowed', 400
-
-    # Create a unique filename to avoid conflicts
-    filename = secure_filename(file.filename)
-    temp_filename = f"{os.path.splitext(filename)[0]}_{os.urandom(4).hex()}{file_ext}"
-    temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
-    
+def process_audio():
     try:
-        file.save(temp_path)
-        output_path = process_audio(temp_path, 1.15)  # Fixed speed up factor
+        logger.info("Processing new audio request")
+        if 'file' not in request.files:
+            logger.error("No file part in request")
+            return jsonify({'error': 'No file part'}), 400
         
-        return send_file(
-            output_path,
-            as_attachment=True,
-            download_name=f"speedup_{filename}"
-        )
+        file = request.files['file']
+        if file.filename == '':
+            logger.error("No selected file")
+            return jsonify({'error': 'No selected file'}), 400
+
+        if file:
+            filename = secure_filename(file.filename)
+            logger.info(f"Processing file: {filename}")
+            
+            # Save uploaded file
+            temp_input = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(temp_input)
+            logger.info(f"File saved to: {temp_input}")
+
+            try:
+                # Load and process audio
+                audio = AudioSegment.from_file(temp_input)
+                logger.info("Audio file loaded successfully")
+                
+                # Speed up the audio (1.15x)
+                fast_audio = audio.speedup(playback_speed=1.15)
+                logger.info("Audio speed adjustment completed")
+
+                # Save the processed audio
+                output_filename = f"fast_{filename}"
+                temp_output = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
+                fast_audio.export(temp_output, format=os.path.splitext(filename)[1][1:])
+                logger.info(f"Processed audio saved to: {temp_output}")
+
+                # Send the file
+                return send_file(
+                    temp_output,
+                    as_attachment=True,
+                    download_name=output_filename
+                )
+            except Exception as e:
+                logger.error(f"Error processing audio: {str(e)}")
+                logger.error(traceback.format_exc())
+                return jsonify({'error': f'Error processing audio: {str(e)}'}), 500
+            finally:
+                # Clean up temporary files
+                try:
+                    if os.path.exists(temp_input):
+                        os.remove(temp_input)
+                    if os.path.exists(temp_output):
+                        os.remove(temp_output)
+                except Exception as e:
+                    logger.error(f"Error cleaning up temporary files: {str(e)}")
+
     except Exception as e:
-        return f'Error processing file: {str(e)}', 500
-    finally:
-        # Clean up temporary files
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except Exception:
-            pass  # Ignore cleanup errors
+        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
