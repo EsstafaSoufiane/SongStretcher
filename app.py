@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 import subprocess
 import shutil
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -33,7 +34,7 @@ if not TEMP_DIR.exists():
     TEMP_DIR.mkdir(parents=True)
 
 app.config['UPLOAD_FOLDER'] = str(TEMP_DIR)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
 def get_ffmpeg_path():
     """Get the appropriate FFmpeg path based on environment"""
@@ -51,6 +52,38 @@ def get_ffmpeg_path():
             return path
     
     return "ffmpeg"  # Default to system PATH
+
+def get_audio_duration(file_path):
+    """Get the duration of an audio file in seconds using FFmpeg"""
+    try:
+        ffmpeg_path = get_ffmpeg_path()
+        cmd = [
+            ffmpeg_path,
+            "-i", file_path,
+            "-hide_banner"
+        ]
+        
+        # Run FFmpeg command to get file info
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        
+        # FFmpeg prints file info to stderr
+        stdout, stderr = process.communicate()
+        
+        # Find duration in output
+        duration_match = re.search(r"Duration: (\d{2}):(\d{2}):(\d{2})", stderr)
+        if duration_match:
+            hours, minutes, seconds = map(int, duration_match.groups())
+            total_seconds = hours * 3600 + minutes * 60 + seconds
+            return total_seconds
+        return None
+    except Exception as e:
+        logger.error(f"Error getting audio duration: {str(e)}")
+        return None
 
 def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
     """Process audio using direct FFmpeg command"""
@@ -138,6 +171,12 @@ def process_audio():
 
         # Save uploaded file
         file.save(input_path)
+
+        # Check audio duration
+        duration = get_audio_duration(input_path)
+        if duration is not None and duration > 12 * 60:  # 12 minutes in seconds
+            cleanup_temp_files(input_path)
+            return jsonify({'error': 'Audio file duration exceeds 12 minutes limit'}), 400
 
         # Process the audio file
         success = process_audio_with_ffmpeg(input_path, output_path, speed, volume)
