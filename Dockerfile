@@ -18,11 +18,11 @@ COPY . .
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
-ENV WORKERS=1
-ENV THREADS=4
-ENV TIMEOUT=600
-ENV MAX_REQUESTS=1000
+ENV TIMEOUT=1800
 ENV WORKER_CLASS=sync
+ENV WORKERS=1
+ENV THREADS=1
+ENV MAX_REQUESTS=1
 
 # Create directory for temporary files
 RUN mkdir -p /app/temp
@@ -30,12 +30,14 @@ RUN mkdir -p /app/temp
 # Expose the port
 EXPOSE 8080
 
-# Command to run the application
+# Command to run the application with increased timeout
 CMD gunicorn app:app \
     --bind 0.0.0.0:8080 \
+    --timeout ${TIMEOUT} \
     --workers ${WORKERS} \
     --threads ${THREADS} \
-    --timeout ${TIMEOUT} \
-    --max-requests ${MAX_REQUESTS} \
     --worker-class ${WORKER_CLASS} \
-    --log-level info
+    --max-requests ${MAX_REQUESTS} \
+    --log-level debug \
+    --keep-alive 5 \
+    --preload

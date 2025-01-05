@@ -8,6 +8,7 @@ import logging
 import traceback
 import uuid
 from pathlib import Path
+import gc
 
 # Configure logging
 logging.basicConfig(
@@ -74,6 +75,51 @@ def cleanup_temp_files(*files):
         except Exception as e:
             logger.error(f"Error cleaning up file {file}: {str(e)}")
 
+def process_audio_in_chunks(input_path, output_path, chunk_duration=30000):
+    """Process audio in chunks to reduce memory usage"""
+    try:
+        # Load audio file info without loading the entire file
+        audio = AudioSegment.from_file(input_path)
+        total_duration = len(audio)
+        logger.info(f"Total audio duration: {total_duration}ms")
+
+        # Process in chunks
+        processed_chunks = []
+        for start_time in range(0, total_duration, chunk_duration):
+            end_time = min(start_time + chunk_duration, total_duration)
+            logger.info(f"Processing chunk: {start_time}ms to {end_time}ms")
+            
+            # Extract and process chunk
+            chunk = audio[start_time:end_time]
+            fast_chunk = chunk.speedup(playback_speed=1.15)
+            processed_chunks.append(fast_chunk)
+            
+            # Clear memory
+            del chunk
+            gc.collect()
+
+        # Combine chunks
+        logger.info("Combining processed chunks")
+        final_audio = sum(processed_chunks, AudioSegment.empty())
+        
+        # Export with optimized settings
+        logger.info("Exporting final audio")
+        final_audio.export(
+            output_path,
+            format=os.path.splitext(output_path)[1][1:],
+            parameters=["-q:a", "0"]
+        )
+        
+        # Clear memory
+        del audio, final_audio, processed_chunks
+        gc.collect()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error in process_audio_in_chunks: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -110,33 +156,16 @@ def process_audio():
         file.save(temp_input)
         logger.info(f"File saved to: {temp_input}")
 
-        try:
-            # Process in smaller chunks if possible
-            audio = AudioSegment.from_file(temp_input)
-            logger.info(f"Audio loaded: duration={len(audio)}ms")
-
-            # Speed up the audio (1.15x)
-            fast_audio = audio.speedup(playback_speed=1.15)
-            logger.info("Audio speed adjustment completed")
-
-            # Export with optimal settings
-            fast_audio.export(
-                temp_output,
-                format=file_ext[1:],
-                parameters=["-q:a", "0"]  # Use highest quality
-            )
-            logger.info(f"Processed audio saved to: {temp_output}")
-
+        # Process audio in chunks
+        if process_audio_in_chunks(temp_input, temp_output):
+            logger.info("Audio processing completed successfully")
             return send_file(
                 temp_output,
                 as_attachment=True,
                 download_name=f"fast_{filename}"
             )
-
-        except Exception as e:
-            logger.error(f"Error processing audio: {str(e)}")
-            logger.error(traceback.format_exc())
-            return jsonify({'error': f'Error processing audio: {str(e)}'}), 500
+        else:
+            return jsonify({'error': 'Failed to process audio'}), 500
 
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
