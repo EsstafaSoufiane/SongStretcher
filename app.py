@@ -3,8 +3,17 @@ from pydub import AudioSegment
 import os
 from werkzeug.utils import secure_filename
 import tempfile
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app, resources={
+    r"/*": {  # Allow all routes since we're using the same domain
+        "origins": "*",  # In production, you should specify your domain
+        "methods": ["GET", "POST"],
+        "allow_headers": ["Content-Type"]
+    }
+})
+
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
