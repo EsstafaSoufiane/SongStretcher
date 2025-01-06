@@ -128,31 +128,40 @@ def check_memory_usage():
     return memory_usage
 
 def process_audio_with_ffmpeg(input_path, output_path, speed, volume):
-    """Process audio file using FFmpeg with memory-efficient settings"""
+    """Process audio file using FFmpeg with cartoon/anime voice effect"""
     try:
-        # Log memory usage before processing
         logger.info(f"Current memory usage: {check_memory_usage():.2f} MB")
         
-        # Get FFmpeg path
-        ffmpeg_path = 'ffmpeg'  # Using system FFmpeg
+        ffmpeg_path = 'ffmpeg'
         logger.info(f"Using FFmpeg at: {ffmpeg_path}")
         
-        # Construct FFmpeg command with memory-efficient settings
+        # Complex filter for cartoon/anime voice effect:
+        # 1. Speed adjustment (atempo)
+        # 2. Pitch shifting (asetrate, aresample)
+        # 3. Echo/reverb effect (aecho)
+        # 4. Volume adjustment
+        filter_complex = (
+            f"asetrate=44100*1.3,aresample=44100,"  # Pitch up
+            f"atempo={speed},"  # Speed adjustment
+            f"aecho=0.8:0.8:40|50|70:0.4|0.3|0.2,"  # Echo effect
+            f"volume={volume},"  # Volume adjustment
+            f"highpass=f=300,lowpass=f=4000"  # EQ adjustment
+        )
+        
         command = [
             ffmpeg_path,
             '-i', input_path,
-            '-filter:a', f'atempo={speed},volume={volume}',
-            '-y',  # Overwrite output file
-            '-progress', 'pipe:1',  # Show progress
+            '-filter_complex', filter_complex,
+            '-y',
+            '-progress', 'pipe:1',
             '-loglevel', 'info',
-            '-threads', '2',  # Limit threads
-            '-compression_level', '6',  # Balanced compression
+            '-threads', '2',
+            '-compression_level', '6',
             output_path
         ]
         
         logger.info(f"Running FFmpeg command: {' '.join(command)}")
         
-        # Run FFmpeg command
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -160,15 +169,12 @@ def process_audio_with_ffmpeg(input_path, output_path, speed, volume):
             universal_newlines=True
         )
         
-        # Monitor the process
         stdout, stderr = process.communicate()
         
-        # Check if process was successful
         if process.returncode != 0:
             logger.error(f"FFmpeg error: {stderr}")
             return False
             
-        # Log memory usage after processing
         logger.info(f"Current memory usage after processing: {check_memory_usage():.2f} MB")
         return True
         
@@ -176,7 +182,6 @@ def process_audio_with_ffmpeg(input_path, output_path, speed, volume):
         logger.error(f"Error in process_audio_with_ffmpeg: {str(e)}")
         return False
     finally:
-        # Force garbage collection
         gc.collect()
 
 def process_audio_job(input_path, output_path, speed, volume):
