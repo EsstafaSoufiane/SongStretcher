@@ -13,6 +13,9 @@ import shutil
 import re
 import gc
 import psutil
+from rq import Queue
+from redis import Redis
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +32,11 @@ CORS(app, resources={
         "allow_headers": ["Content-Type"]
     }
 })
+
+# Set up Redis and RQ
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+redis_conn = Redis.from_url(redis_url)
+queue = Queue(connection=redis_conn)
 
 # Set up temporary directory
 TEMP_DIR = Path("/app/temp")
@@ -173,6 +181,17 @@ def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
         # Force garbage collection after processing
         gc.collect()
 
+def process_audio_job(input_path, output_path, speed, volume):
+    """Background job for processing audio"""
+    try:
+        success = process_audio_with_ffmpeg(input_path, output_path, speed, volume)
+        if success:
+            return {'status': 'completed', 'output_path': output_path}
+        return {'status': 'failed', 'error': 'Processing failed'}
+    except Exception as e:
+        logger.error(f"Error in process_audio_job: {str(e)}")
+        return {'status': 'failed', 'error': str(e)}
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -180,11 +199,7 @@ def index():
 @app.route('/process-audio', methods=['POST'])
 def process_audio():
     input_path = None
-    output_path = None
-    
     try:
-        initial_memory = check_memory_usage()
-        
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
 
@@ -204,13 +219,12 @@ def process_audio():
 
         # Generate unique filenames
         filename = secure_filename(file.filename)
-        input_path = os.path.join(app.config['UPLOAD_FOLDER'], f"input_{uuid.uuid4()}_{filename}")
-        output_filename = f"processed_{filename}"
-        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"output_{uuid.uuid4()}_{filename}")
+        job_id = str(uuid.uuid4())
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], f"input_{job_id}_{filename}")
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"output_{job_id}_{filename}")
 
         # Save uploaded file
         file.save(input_path)
-        logger.info(f"Memory usage after file save: {check_memory_usage():.2f} MB")
 
         # Check audio duration
         duration = get_audio_duration(input_path)
@@ -218,48 +232,96 @@ def process_audio():
             cleanup_temp_files(input_path)
             return jsonify({'error': 'Audio file duration exceeds 12 minutes limit'}), 400
 
-        def generate():
-            try:
-                # Process the audio file
-                success = process_audio_with_ffmpeg(input_path, output_path, speed, volume)
-                
-                if not success:
-                    cleanup_temp_files(input_path, output_path)
-                    yield jsonify({'error': 'Failed to process audio'}).get_data(as_text=True)
-                    return
-
-                # Stream the file in chunks
-                chunk_size = 8192  # 8KB chunks to conserve memory
-                with open(output_path, 'rb') as f:
-                    while True:
-                        chunk = f.read(chunk_size)
-                        if not chunk:
-                            break
-                        yield chunk
-                        
-                        # Check memory usage periodically
-                        current_memory = check_memory_usage()
-                        if current_memory > initial_memory + 500:  # If memory increased by 500MB
-                            logger.warning(f"High memory usage during streaming: {current_memory:.2f} MB")
-
-            finally:
-                # Clean up temp files after streaming
-                cleanup_temp_files(input_path, output_path)
-                gc.collect()  # Force garbage collection after processing
-
-        return Response(
-            stream_with_context(generate()),
-            mimetype='audio/mpeg',
-            headers={
-                'Content-Disposition': f'attachment; filename={output_filename}'
-            }
+        # Queue the processing job
+        job = queue.enqueue(
+            process_audio_job,
+            args=(input_path, output_path, speed, volume),
+            job_timeout='10m',  # 10 minutes timeout
+            result_ttl=300  # Keep result for 5 minutes
         )
+
+        return jsonify({
+            'status': 'processing',
+            'job_id': job.id,
+            'message': 'Audio processing started'
+        }), 202
 
     except Exception as e:
         logger.error(f"Error in process_audio: {str(e)}")
-        logger.error(traceback.format_exc())
-        if input_path or output_path:
-            cleanup_temp_files(input_path, output_path)
+        if input_path:
+            cleanup_temp_files(input_path)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/status/<job_id>', methods=['GET'])
+def get_status(job_id):
+    """Check the status of a processing job"""
+    try:
+        job = queue.fetch_job(job_id)
+        if job is None:
+            return jsonify({'status': 'not_found'}), 404
+
+        if job.is_failed:
+            return jsonify({
+                'status': 'failed',
+                'error': str(job.exc_info)
+            }), 500
+
+        if job.is_finished:
+            result = job.result
+            if result['status'] == 'completed':
+                return jsonify({
+                    'status': 'completed',
+                    'download_url': f'/download/{job_id}'
+                })
+            return jsonify({'status': 'failed', 'error': result.get('error', 'Unknown error')})
+
+        # Job is still processing
+        return jsonify({
+            'status': 'processing',
+            'position': job.get_position(),
+            'progress': job.meta.get('progress', 0)
+        })
+
+    except Exception as e:
+        logger.error(f"Error checking job status: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download/<job_id>', methods=['GET'])
+def download_file(job_id):
+    """Download the processed file"""
+    try:
+        job = queue.fetch_job(job_id)
+        if job is None or not job.is_finished:
+            return jsonify({'error': 'File not found'}), 404
+
+        result = job.result
+        if result['status'] != 'completed':
+            return jsonify({'error': 'Processing failed'}), 500
+
+        output_path = result['output_path']
+        if not os.path.exists(output_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        def generate():
+            try:
+                with open(output_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(8192)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                cleanup_temp_files(output_path)
+
+        filename = os.path.basename(output_path)
+        return Response(
+            generate(),
+            mimetype='audio/mpeg',
+            headers={'Content-Disposition': f'attachment; filename={filename}'}
+        )
+
+    except Exception as e:
+        logger.error(f"Error downloading file: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
