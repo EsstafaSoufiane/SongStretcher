@@ -34,9 +34,21 @@ CORS(app, resources={
 })
 
 # Set up Redis and RQ
-redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
-redis_conn = Redis.from_url(redis_url)
-queue = Queue(connection=redis_conn)
+redis_url = os.getenv('REDIS_URL')
+if not redis_url:
+    # Fallback to synchronous processing if Redis is not available
+    logger.warning("Redis URL not found, falling back to synchronous processing")
+    USE_REDIS = False
+else:
+    try:
+        redis_conn = Redis.from_url(redis_url)
+        redis_conn.ping()  # Test connection
+        queue = Queue(connection=redis_conn)
+        USE_REDIS = True
+        logger.info("Successfully connected to Redis")
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis: {str(e)}")
+        USE_REDIS = False
 
 # Set up temporary directory
 TEMP_DIR = Path("/app/temp")
@@ -199,6 +211,7 @@ def index():
 @app.route('/process-audio', methods=['POST'])
 def process_audio():
     input_path = None
+    output_path = None
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
@@ -232,24 +245,41 @@ def process_audio():
             cleanup_temp_files(input_path)
             return jsonify({'error': 'Audio file duration exceeds 12 minutes limit'}), 400
 
-        # Queue the processing job
-        job = queue.enqueue(
-            process_audio_job,
-            args=(input_path, output_path, speed, volume),
-            job_timeout='10m',  # 10 minutes timeout
-            result_ttl=300  # Keep result for 5 minutes
-        )
+        if USE_REDIS:
+            # Queue the processing job
+            job = queue.enqueue(
+                process_audio_job,
+                args=(input_path, output_path, speed, volume),
+                job_timeout='10m',  # 10 minutes timeout
+                result_ttl=300  # Keep result for 5 minutes
+            )
 
-        return jsonify({
-            'status': 'processing',
-            'job_id': job.id,
-            'message': 'Audio processing started'
-        }), 202
+            return jsonify({
+                'status': 'processing',
+                'job_id': job.id,
+                'message': 'Audio processing started',
+                'queue_enabled': True
+            }), 202
+        else:
+            # Process synchronously if Redis is not available
+            success = process_audio_with_ffmpeg(input_path, output_path, speed, volume)
+            if not success:
+                cleanup_temp_files(input_path, output_path)
+                return jsonify({'error': 'Failed to process audio'}), 500
+
+            return jsonify({
+                'status': 'completed',
+                'message': 'Audio processed successfully',
+                'queue_enabled': False,
+                'download_url': f'/download/direct/{os.path.basename(output_path)}'
+            })
 
     except Exception as e:
         logger.error(f"Error in process_audio: {str(e)}")
         if input_path:
             cleanup_temp_files(input_path)
+        if output_path and os.path.exists(output_path):
+            cleanup_temp_files(output_path)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/status/<job_id>', methods=['GET'])
@@ -314,6 +344,35 @@ def download_file(job_id):
                 cleanup_temp_files(output_path)
 
         filename = os.path.basename(output_path)
+        return Response(
+            generate(),
+            mimetype='audio/mpeg',
+            headers={'Content-Disposition': f'attachment; filename={filename}'}
+        )
+
+    except Exception as e:
+        logger.error(f"Error downloading file: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download/direct/<filename>')
+def download_direct(filename):
+    """Direct download for synchronous processing"""
+    try:
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if not os.path.exists(output_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        def generate():
+            try:
+                with open(output_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(8192)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                cleanup_temp_files(output_path)
+
         return Response(
             generate(),
             mimetype='audio/mpeg',

@@ -179,35 +179,48 @@
                 }
 
                 const data = await response.json();
-                const jobId = data.job_id;
+                
+                if (data.queue_enabled) {
+                    // Handle queued processing
+                    const jobId = data.job_id;
+                    while (true) {
+                        const statusResponse = await fetch(`/status/${jobId}`);
+                        const statusData = await statusResponse.json();
 
-                // Poll for job status
-                while (true) {
-                    const statusResponse = await fetch(`/status/${jobId}`);
-                    const statusData = await statusResponse.json();
+                        if (statusData.status === 'failed') {
+                            throw new Error(statusData.error || 'Processing failed');
+                        }
 
-                    if (statusData.status === 'failed') {
-                        throw new Error(statusData.error || 'Processing failed');
+                        if (statusData.status === 'completed') {
+                            // Download the file
+                            window.location.href = statusData.download_url;
+                            break;
+                        }
+
+                        // Update progress
+                        progressBar.style.width = `${statusData.progress}%`;
+                        progressBar.setAttribute('aria-valuenow', statusData.progress);
+                        
+                        if (statusData.position > 0) {
+                            statusMessage.textContent = `Queued for processing (Position: ${statusData.position})...`;
+                        } else {
+                            statusMessage.textContent = 'Processing your audio...';
+                        }
+
+                        // Wait before next poll
+                        await new Promise(resolve => setTimeout(resolve, 1000));
                     }
-
-                    if (statusData.status === 'completed') {
-                        // Download the file
-                        window.location.href = statusData.download_url;
-                        break;
-                    }
-
-                    // Update progress
-                    progressBar.style.width = `${statusData.progress}%`;
-                    progressBar.setAttribute('aria-valuenow', statusData.progress);
+                } else {
+                    // Handle synchronous processing
+                    statusMessage.textContent = 'Processing your audio...';
+                    progressBar.style.width = '100%';
+                    progressBar.setAttribute('aria-valuenow', 100);
                     
-                    if (statusData.position > 0) {
-                        statusMessage.textContent = `Queued for processing (Position: ${statusData.position})...`;
+                    if (data.status === 'completed') {
+                        window.location.href = data.download_url;
                     } else {
-                        statusMessage.textContent = 'Processing your audio...';
+                        throw new Error('Processing failed');
                     }
-
-                    // Wait before next poll
-                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
 
             } catch (error) {
