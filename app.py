@@ -11,6 +11,8 @@ from pathlib import Path
 import subprocess
 import shutil
 import re
+import gc
+import psutil
 
 # Configure logging
 logging.basicConfig(
@@ -85,16 +87,37 @@ def get_audio_duration(file_path):
         logger.error(f"Error getting audio duration: {str(e)}")
         return None
 
+def cleanup_temp_files(*files):
+    """Clean up temporary files and force garbage collection"""
+    for file in files:
+        try:
+            if file and os.path.exists(file):
+                os.remove(file)
+                logger.info(f"Cleaned up temporary file: {file}")
+        except Exception as e:
+            logger.error(f"Error cleaning up file {file}: {str(e)}")
+    
+    # Force garbage collection
+    gc.collect()
+
+def check_memory_usage():
+    """Check current memory usage and log if it's high"""
+    process = psutil.Process(os.getpid())
+    memory_usage = process.memory_info().rss / 1024 / 1024  # Convert to MB
+    logger.info(f"Current memory usage: {memory_usage:.2f} MB")
+    return memory_usage
+
 def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
-    """Process audio using direct FFmpeg command"""
+    """Process audio using direct FFmpeg command with memory optimization"""
     try:
+        initial_memory = check_memory_usage()
         ffmpeg_path = get_ffmpeg_path()
         logger.info(f"Using FFmpeg at: {ffmpeg_path}")
         
         # Construct FFmpeg command with speed and volume filters
         filter_str = f"atempo={speed},volume={volume}"
         
-        # Add progress handling to FFmpeg command
+        # Add progress handling and memory optimization to FFmpeg command
         cmd = [
             ffmpeg_path,
             "-i", input_path,
@@ -102,6 +125,8 @@ def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
             "-y",  # Overwrite output file if it exists
             "-progress", "pipe:1",  # Output progress to stdout
             "-loglevel", "info",
+            "-max_memory", "100M",  # Limit FFmpeg memory usage
+            "-compression_level", "6",  # Balance between speed and memory usage
             output_path
         ]
         
@@ -116,7 +141,7 @@ def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
             bufsize=1
         )
         
-        # Monitor the process
+        # Monitor the process and memory usage
         while True:
             if process.poll() is not None:
                 break
@@ -124,6 +149,11 @@ def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
             output = process.stdout.readline()
             if output:
                 logger.info(f"FFmpeg progress: {output.strip()}")
+            
+            # Check memory usage periodically
+            current_memory = check_memory_usage()
+            if current_memory > initial_memory + 500:  # If memory increased by 500MB
+                logger.warning(f"High memory usage detected: {current_memory:.2f} MB")
         
         if process.returncode != 0:
             stderr = process.stderr.read()
@@ -131,22 +161,17 @@ def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
             return False
             
         logger.info("FFmpeg processing completed successfully")
+        final_memory = check_memory_usage()
+        logger.info(f"Memory usage change: {final_memory - initial_memory:.2f} MB")
         return True
         
     except Exception as e:
         logger.error(f"Error in process_audio_with_ffmpeg: {str(e)}")
         logger.error(traceback.format_exc())
         return False
-
-def cleanup_temp_files(*files):
-    """Clean up temporary files"""
-    for file in files:
-        try:
-            if file and os.path.exists(file):
-                os.remove(file)
-                logger.info(f"Cleaned up temporary file: {file}")
-        except Exception as e:
-            logger.error(f"Error cleaning up file {file}: {str(e)}")
+    finally:
+        # Force garbage collection after processing
+        gc.collect()
 
 @app.route('/')
 def index():
@@ -154,7 +179,12 @@ def index():
 
 @app.route('/process-audio', methods=['POST'])
 def process_audio():
+    input_path = None
+    output_path = None
+    
     try:
+        initial_memory = check_memory_usage()
+        
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
 
@@ -180,6 +210,7 @@ def process_audio():
 
         # Save uploaded file
         file.save(input_path)
+        logger.info(f"Memory usage after file save: {check_memory_usage():.2f} MB")
 
         # Check audio duration
         duration = get_audio_duration(input_path)
@@ -198,17 +229,23 @@ def process_audio():
                     return
 
                 # Stream the file in chunks
-                chunk_size = 8192
+                chunk_size = 8192  # 8KB chunks to conserve memory
                 with open(output_path, 'rb') as f:
                     while True:
                         chunk = f.read(chunk_size)
                         if not chunk:
                             break
                         yield chunk
+                        
+                        # Check memory usage periodically
+                        current_memory = check_memory_usage()
+                        if current_memory > initial_memory + 500:  # If memory increased by 500MB
+                            logger.warning(f"High memory usage during streaming: {current_memory:.2f} MB")
 
             finally:
                 # Clean up temp files after streaming
                 cleanup_temp_files(input_path, output_path)
+                gc.collect()  # Force garbage collection after processing
 
         return Response(
             stream_with_context(generate()),
@@ -221,6 +258,8 @@ def process_audio():
     except Exception as e:
         logger.error(f"Error in process_audio: {str(e)}")
         logger.error(traceback.format_exc())
+        if input_path or output_path:
+            cleanup_temp_files(input_path, output_path)
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
