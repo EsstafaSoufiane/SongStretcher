@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, send_file, jsonify
+from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context
 from pydub import AudioSegment
 import os
 from werkzeug.utils import secure_filename
@@ -94,30 +94,39 @@ def process_audio_with_ffmpeg(input_path, output_path, speed=1.15, volume=1.0):
         # Construct FFmpeg command with speed and volume filters
         filter_str = f"atempo={speed},volume={volume}"
         
-        # Construct FFmpeg command
+        # Add progress handling to FFmpeg command
         cmd = [
             ffmpeg_path,
             "-i", input_path,
             "-filter:a", filter_str,
             "-y",  # Overwrite output file if it exists
+            "-progress", "pipe:1",  # Output progress to stdout
             "-loglevel", "info",
             output_path
         ]
         
         logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
         
-        # Run FFmpeg command
+        # Run FFmpeg command with progress monitoring
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True
+            universal_newlines=True,
+            bufsize=1
         )
         
         # Monitor the process
-        stdout, stderr = process.communicate()
+        while True:
+            if process.poll() is not None:
+                break
+                
+            output = process.stdout.readline()
+            if output:
+                logger.info(f"FFmpeg progress: {output.strip()}")
         
         if process.returncode != 0:
+            stderr = process.stderr.read()
             logger.error(f"FFmpeg error: {stderr}")
             return False
             
@@ -178,27 +187,36 @@ def process_audio():
             cleanup_temp_files(input_path)
             return jsonify({'error': 'Audio file duration exceeds 12 minutes limit'}), 400
 
-        # Process the audio file
-        success = process_audio_with_ffmpeg(input_path, output_path, speed, volume)
+        def generate():
+            try:
+                # Process the audio file
+                success = process_audio_with_ffmpeg(input_path, output_path, speed, volume)
+                
+                if not success:
+                    cleanup_temp_files(input_path, output_path)
+                    yield jsonify({'error': 'Failed to process audio'}).get_data(as_text=True)
+                    return
 
-        if not success:
-            cleanup_temp_files(input_path, output_path)
-            return jsonify({'error': 'Failed to process audio'}), 500
+                # Stream the file in chunks
+                chunk_size = 8192
+                with open(output_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        yield chunk
 
-        # Send the processed file
-        response = send_file(
-            output_path,
-            as_attachment=True,
-            download_name=output_filename,
-            mimetype='audio/mpeg'
+            finally:
+                # Clean up temp files after streaming
+                cleanup_temp_files(input_path, output_path)
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype='audio/mpeg',
+            headers={
+                'Content-Disposition': f'attachment; filename={output_filename}'
+            }
         )
-
-        # Clean up temp files after sending
-        @response.call_on_close
-        def cleanup():
-            cleanup_temp_files(input_path, output_path)
-
-        return response
 
     except Exception as e:
         logger.error(f"Error in process_audio: {str(e)}")

@@ -85,6 +85,9 @@
                     <span class="visually-hidden">Loading...</span>
                 </div>
                 <p class="mt-2">Processing your audio...</p>
+                <div class="progress mt-3" style="display: none;">
+                    <div class="progress-bar" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                </div>
             </div>
         </form>
     </div>
@@ -159,6 +162,9 @@
             formData.append('volume', volumeRange.value);
 
             loading.style.display = 'block';
+            const progressBar = loading.querySelector('.progress');
+            const progressBarInner = progressBar.querySelector('.progress-bar');
+            progressBar.style.display = 'block';
             speedupBtn.disabled = true;
 
             try {
@@ -173,9 +179,40 @@
                 }
 
                 // Get the blob from the response
-                const blob = await response.blob();
+                const reader = response.body.getReader();
+                const contentLength = +response.headers.get('Content-Length');
                 
-                // Create a download link
+                let receivedLength = 0;
+                const chunks = [];
+                
+                while(true) {
+                    const {done, value} = await reader.read();
+                    
+                    if (done) {
+                        break;
+                    }
+                    
+                    chunks.push(value);
+                    receivedLength += value.length;
+                    
+                    // Update progress bar
+                    if (contentLength) {
+                        const progress = (receivedLength / contentLength) * 100;
+                        progressBarInner.style.width = progress + '%';
+                        progressBarInner.setAttribute('aria-valuenow', progress);
+                    }
+                }
+                
+                // Concatenate chunks into a single Uint8Array
+                const chunksAll = new Uint8Array(receivedLength);
+                let position = 0;
+                for(let chunk of chunks) {
+                    chunksAll.set(chunk, position);
+                    position += chunk.length;
+                }
+                
+                // Create blob and download
+                const blob = new Blob([chunksAll], {type: 'audio/mpeg'});
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
@@ -189,6 +226,9 @@
                 alert(error.message);
             } finally {
                 loading.style.display = 'none';
+                progressBar.style.display = 'none';
+                progressBarInner.style.width = '0%';
+                progressBarInner.setAttribute('aria-valuenow', 0);
                 speedupBtn.disabled = false;
             }
         }
