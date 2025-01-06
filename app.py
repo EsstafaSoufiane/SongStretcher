@@ -128,24 +128,27 @@ def check_memory_usage():
     return memory_usage
 
 def process_audio_with_ffmpeg(input_path, output_path, speed, volume):
-    """Process audio file using FFmpeg with cartoon/anime voice effect"""
+    """Process audio file using FFmpeg with clean remixer effect"""
     try:
         logger.info(f"Current memory usage: {check_memory_usage():.2f} MB")
         
         ffmpeg_path = 'ffmpeg'
         logger.info(f"Using FFmpeg at: {ffmpeg_path}")
         
-        # Complex filter for cartoon/anime voice effect:
-        # 1. Speed adjustment (atempo)
-        # 2. Pitch shifting (asetrate, aresample)
-        # 3. Echo/reverb effect (aecho)
-        # 4. Volume adjustment
+        # Complex filter for clean remixer effect:
+        # 1. Pitch shifting (asetrate, aresample)
+        # 2. Speed adjustment (atempo)
+        # 3. Dynamic compression for consistent volume
+        # 4. EQ adjustments for clarity
+        # 5. Final volume adjustment
         filter_complex = (
-            f"asetrate=44100*1.3,aresample=44100,"  # Pitch up
+            f"asetrate=44100*1.25,aresample=44100,"  # Slight pitch up
             f"atempo={speed},"  # Speed adjustment
-            f"aecho=0.8:0.8:40|50|70:0.4|0.3|0.2,"  # Echo effect
-            f"volume={volume},"  # Volume adjustment
-            f"highpass=f=300,lowpass=f=4000"  # EQ adjustment
+            f"compand=attacks=0:points=-80/-80|-45/-45|-27/-25|0/-10|20/-7:gain=2,"  # Dynamic compression
+            f"equalizer=f=100:t=h:w=200:g=-6,"  # Reduce low rumble
+            f"equalizer=f=3000:t=h:w=200:g=4,"  # Boost presence
+            f"equalizer=f=8000:t=h:w=200:g=3,"  # Add air/brightness
+            f"volume={volume}"  # Volume adjustment
         )
         
         command = [
